@@ -199,6 +199,9 @@ export const make = Effect.gen(function* () {
           }),
       ),
     );
+    if (handle.kind !== "git") {
+      return yield* new GitManagerError({ operation, cwd, detail: "This operation requires Git." });
+    }
     return handle;
   });
 
@@ -218,6 +221,14 @@ export const make = Effect.gen(function* () {
           }),
       ),
     );
+    if (handle.kind !== "git") {
+      return yield* new GitCommandError({
+        operation,
+        cwd,
+        command: "vcs-route",
+        detail: "This operation requires Git.",
+      });
+    }
     return handle;
   });
 
@@ -234,10 +245,7 @@ export const make = Effect.gen(function* () {
             }),
         ),
       );
-      if (!handle) {
-        return false;
-      }
-      return true;
+      return handle?.kind === "git";
     },
   );
 
@@ -256,10 +264,7 @@ export const make = Effect.gen(function* () {
           }),
       ),
     );
-    if (!handle) {
-      return false;
-    }
-    return true;
+    return handle?.kind === "git";
   });
 
   const routeGitManager =
@@ -325,14 +330,32 @@ export const make = Effect.gen(function* () {
         ),
       );
     }),
-    localStatus: Effect.fn("GitWorkflowService.localStatus")(function (input) {
-      return detectGitRepositoryForStatus("GitWorkflowService.localStatus", input.cwd).pipe(
-        Effect.flatMap((isGitRepository) =>
-          isGitRepository
-            ? gitManager.localStatus(input)
-            : Effect.succeed(nonRepositoryLocalStatus()),
+    localStatus: Effect.fn("GitWorkflowService.localStatus")(function* (input) {
+      const handle = yield* registry.detect({ cwd: input.cwd }).pipe(
+        Effect.mapError(
+          (cause) =>
+            new GitManagerError({
+              operation: "GitWorkflowService.localStatus",
+              cwd: input.cwd,
+              detail: cause.message,
+            }),
         ),
       );
+      if (handle?.kind === "git") return yield* gitManager.localStatus(input);
+      if (handle?.driver.tovio) {
+        const tovio = yield* handle.driver.tovio.status(handle.repository.rootPath).pipe(
+          Effect.mapError(
+            (cause) =>
+              new GitManagerError({
+                operation: "GitWorkflowService.localStatus",
+                cwd: input.cwd,
+                detail: cause.message,
+              }),
+          ),
+        );
+        return { ...nonRepositoryLocalStatus(), tovio };
+      }
+      return nonRepositoryLocalStatus();
     }),
     currentBranch: Effect.fn("GitWorkflowService.currentBranch")(function* (cwd) {
       if (!(yield* detectGitRepositoryForStatus("GitWorkflowService.currentBranch", cwd))) {

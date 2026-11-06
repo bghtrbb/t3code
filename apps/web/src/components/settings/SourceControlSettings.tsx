@@ -2,12 +2,13 @@ import { RefreshIcon } from "~/components/ui/refresh-icon";
 import { ChevronDownIcon } from "lucide-react";
 import * as Option from "effect/Option";
 import { useState, type ReactNode } from "react";
-import type {
-  SourceControlDiscoveryResult,
-  SourceControlProviderAuth,
-  SourceControlProviderDiscoveryItem,
-  VcsDriverKind,
-  VcsDiscoveryItem,
+import {
+  TOVIO_FORGE_PROVIDER_KIND,
+  type SourceControlDiscoveryResult,
+  type SourceControlProviderAuth,
+  type SourceControlProviderDiscoveryItem,
+  type VcsDriverKind,
+  type VcsDiscoveryItem,
 } from "@t3tools/contracts";
 import { useSettingsScope } from "./SettingsScopeContext";
 import { ProjectDefaultsSettings } from "./ProjectDefaultsSettings";
@@ -72,6 +73,15 @@ function isVcsNotReady(item: VcsDiscoveryItem | SourceControlProviderDiscoveryIt
   return !isProviderDiscoveryItem(item) && !item.implemented;
 }
 
+function isDiscoveryItemAvailable(item: VcsDiscoveryItem | SourceControlProviderDiscoveryItem) {
+  return (
+    item.status === "available" &&
+    (isProviderDiscoveryItem(item)
+      ? item.kind === TOVIO_FORGE_PROVIDER_KIND || item.auth.status === "authenticated"
+      : item.implemented)
+  );
+}
+
 function authPresentation(auth: SourceControlProviderAuth): {
   readonly label: string;
   readonly badge: "secondary" | null;
@@ -99,9 +109,7 @@ function RedactedAccount(props: { readonly account: string | null }) {
 function itemStatusDot(item: VcsDiscoveryItem | SourceControlProviderDiscoveryItem): string {
   if (isVcsNotReady(item)) return "bg-muted-foreground/35";
   if (isProviderDiscoveryItem(item)) {
-    return item.status === "available" && item.auth.status === "authenticated"
-      ? "bg-success"
-      : "bg-muted-foreground/35";
+    return isDiscoveryItemAvailable(item) ? "bg-success" : "bg-muted-foreground/35";
   }
   if (item.status !== "available") return "bg-warning";
   return "bg-success";
@@ -161,6 +169,10 @@ function itemSummary({
   }
 
   if (auth) {
+    if (item.kind === TOVIO_FORGE_PROVIDER_KIND) {
+      return <span>Available. {optionLabel(auth.detail)}</span>;
+    }
+
     if (auth.status === "authenticated") {
       const authDetail = optionLabel(auth.detail);
       return (
@@ -213,9 +225,7 @@ function DiscoveryItemRow({
   readonly children?: ReactNode;
 }) {
   const version = optionLabel(item.version);
-  const enabled = isProviderDiscoveryItem(item)
-    ? item.status === "available" && item.auth.status === "authenticated"
-    : item.status === "available" && item.implemented;
+  const enabled = isDiscoveryItemAvailable(item);
   const auth = isProviderDiscoveryItem(item) ? item.auth : null;
   const authStatus = auth ? authPresentation(auth) : null;
   const authAccount = auth ? optionLabel(auth.account) : null;

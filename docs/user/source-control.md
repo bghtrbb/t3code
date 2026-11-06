@@ -26,6 +26,52 @@ Install Git and configure authentication on the machine running your T3 Code ser
 environment, do this on the remote machine. After signing in, open **Settings → Source control**
 and choose **Rescan**.
 
+### TOVIO and Tovio Cloud
+
+Install the TOVIO CLI on the machine running this fork's server and put it on that server's PATH.
+Check the installed CLI before starting the server.
+
+```sh
+tovio --json integration capabilities
+```
+
+The `result` must report `version: 1` and `vcs: true`. Tovio Cloud proposals also require
+`forge_review: true`, and file rewind requires `checkpoints: true`. Set `T3CODE_ENABLE_TOVIO=1`,
+restart the fork's server, and select that server in **Settings → Source control** before choosing
+**Rescan**. Open the TOVIO repository root as a project. T3 Code uses that server's TOVIO identity
+and the project's configured `origin`.
+
+To run the fork alongside an existing T3 Code installation, give the fork its own T3 home and
+server port. For example, start the fork's server in PowerShell with a free port.
+
+```powershell
+$env:T3CODE_ENABLE_TOVIO = "1"
+& "C:\path\to\fork\t3.exe" --base-dir (Join-Path $env:LOCALAPPDATA "T3Code-TOVIO") --port 3778
+```
+
+Each server stores its settings, database, and secrets under its own T3 home. Configure settings
+on each server. Connect web, desktop, or mobile clients to the fork's server to use TOVIO.
+
+To clone, choose **Clone from URL**. For a self-hosted server using the native protocol, enter
+`tovio://host:port/repository-id` and configure `T3CODE_TOVIO_CLONE_CERT` on the server with the
+absolute path to the remote's DER certificate. For Tovio Cloud, enter
+`tovio+https://host/path?repo=repository-id`. Retrying an interrupted clone resumes in the same folder.
+
+Use the project's TOVIO controls to inspect changes, switch lanes, commit, pull, or push. To create a
+proposal in Tovio Cloud, push the committed change first and enter its `chg:` ID and target lane.
+Open a proposal to review its pinned revision. Older servers supply review pins on lanes configured
+with `tovio policy protect <lane> --require-review`. Use **Open in Tovio Cloud** for landing and
+discussions. A self-hosted server can provide this link through `T3CODE_TOVIO_FORGE_WEB_URL`. When
+the native protocol and collaboration endpoints use separate ports, set
+`TOVIO_INTEGRATION_FORGE_ADDR` to the collaboration endpoint's HTTPS `host:port` and
+`TOVIO_INTEGRATION_FORGE_REPO` to the matching origin repository ID. The CLI verifies the
+certificate pinned by the origin.
+
+File rewind requires a fully materialized checkout used by one thread. TOVIO checks the working
+copy and the current policy before restoring files. If the checkout has changed since the last
+checkpoint, start a conversation-only rewind. If a file rewind was already interrupted, retry that
+rewind first. An uncertain provider rollback requires manual reconciliation.
+
 ### GitHub
 
 T3 Code talks to GitHub's API directly and only needs a token. Any of these works, in this

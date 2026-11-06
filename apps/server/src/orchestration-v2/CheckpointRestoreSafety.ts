@@ -7,7 +7,7 @@ import type { ProjectionStoreV2 } from "./ProjectionStore.ts";
 import type * as ProjectStore from "./ProjectStore.ts";
 
 export const SHARED_WORKSPACE_RESTORE_MESSAGE =
-  "File restore requires an isolated worktree. This workspace may contain changes from another thread or a side chat. Rewind the conversation without restoring files instead, or delete side chats you no longer need.";
+  "File restore requires an isolated checkout. This workspace may contain changes from another thread or a side chat. Rewind the conversation without restoring files instead, or delete side chats you no longer need.";
 
 // Check isolation at admission and rollback; checkpoints restore whole checkouts, which may become shared.
 export const isCheckpointRestoreIsolated = Effect.fn("orchestrationV2.isCheckpointRestoreIsolated")(
@@ -19,6 +19,7 @@ export const isCheckpointRestoreIsolated = Effect.fn("orchestrationV2.isCheckpoi
       readonly projections: ProjectionStoreV2["Service"];
       readonly projects: ProjectStore.ProjectStoreV2["Service"];
       readonly path: Path.Path;
+      readonly allowLocal?: boolean;
     },
   ) {
     const { fileSystem, projections, projects, path } = dependencies;
@@ -30,8 +31,9 @@ export const isCheckpointRestoreIsolated = Effect.fn("orchestrationV2.isCheckpoi
       );
     };
     const worktreePath = thread.worktreePath;
-    let shared = worktreePath == null;
-    if (!shared && worktreePath !== null) {
+    const allowedRoot = worktreePath ?? (dependencies.allowLocal === true ? scope.cwd : null);
+    let shared = allowedRoot === null;
+    if (allowedRoot !== null) {
       // Storage cleanup may have removed the worktree; rollback recreates it.
       const resolve = (target: string) =>
         fileSystem.realPath(target).pipe(
@@ -41,7 +43,7 @@ export const isCheckpointRestoreIsolated = Effect.fn("orchestrationV2.isCheckpoi
           ),
         );
       const cwd = yield* resolve(scope.cwd);
-      const worktreeCwd = yield* resolve(worktreePath);
+      const worktreeCwd = yield* resolve(allowedRoot);
       shared = cwd !== worktreeCwd;
       if (!shared) {
         const shell = yield* projections.getShellSnapshot();
@@ -52,6 +54,7 @@ export const isCheckpointRestoreIsolated = Effect.fn("orchestrationV2.isCheckpoi
           if (
             otherThread.lineage.sideChat === true &&
             otherThread.activeRunId === null &&
+            worktreePath !== null &&
             otherThread.worktreePath === worktreePath
           ) {
             const { turnItems } = yield* projections.getThreadRecords(

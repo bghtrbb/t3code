@@ -1,3 +1,4 @@
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import { SourceControlProviderKind } from "@t3tools/contracts";
 import * as NodePath from "@effect/platform-node/NodePath";
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
@@ -18,6 +19,7 @@ import {
 
 import * as ServerConfig from "../config.ts";
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
+import * as VcsProcess from "../vcs/VcsProcess.ts";
 import type * as SourceControlProvider from "@t3tools/source-control-core/server/SourceControlProvider";
 import * as SourceControlProviderRegistry from "./SourceControlProviderRegistry.ts";
 import * as SourceControlRepositoryService from "./SourceControlRepositoryService.ts";
@@ -64,8 +66,10 @@ function layer(input: {
   readonly provider?: SourceControlProvider.SourceControlProvider["Service"];
   readonly git?: Partial<GitVcsDriver.GitVcsDriver["Service"]>;
   readonly fileSystem?: FileSystem.FileSystem;
+  readonly process?: Partial<VcsProcess.VcsProcess["Service"]>;
 }) {
   const layerService = SourceControlRepositoryService.layer.pipe(
+    Layer.provide(Layer.mock(VcsProcess.VcsProcess)(input.process ?? {})),
     Layer.provide(
       Layer.mock(SourceControlProviderRegistry.SourceControlProviderRegistry)({
         resolveLink: () => undefined,
@@ -780,3 +784,72 @@ it.effect("publish succeeds with status remote_added when the local repo has no 
     ),
   );
 });
+
+it.effect(
+  "sends an interrupted TOVIO clone to the native CLI with its repository and TLS pin",
+  () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const platform = yield* HostProcess.Platform;
+      const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-native-clone-" });
+      const bin = path.join(root, "bin");
+      const destination = path.join(root, "interrupted");
+      const metadata = path.join(destination, ".tovio");
+      const cert = path.join(root, "forge.der");
+      yield* fs.makeDirectory(bin);
+      yield* fs.makeDirectory(metadata, { recursive: true });
+      yield* fs.writeFileString(path.join(metadata, "clone-in-progress"), "interrupted");
+      const executable = path.join(bin, platform === "win32" ? "tovio.exe" : "tovio");
+      yield* fs.writeFileString(executable, "");
+      if (platform !== "win32") yield* fs.chmod(executable, 0o755);
+
+      const calls: string[][] = [];
+      const repository = "a".repeat(64);
+      const url = `tovio://localhost:7743/${repository}`;
+      const environment = {
+        PATH: bin,
+        T3CODE_ENABLE_TOVIO: "1",
+        T3CODE_TOVIO_CLONE_CERT: cert,
+      };
+      const service = yield* SourceControlRepositoryService.SourceControlRepositoryService.pipe(
+        Effect.provide(
+          layer({
+            git: { execute: () => Effect.die("TOVIO clone must not use Git") },
+            process: {
+              run: (input) =>
+                Effect.sync(() => {
+                  calls.push([...input.args]);
+                  return {
+                    ...processOutput(),
+                    stdout: JSON.stringify({
+                      result: input.args.includes("capabilities") ? { version: 1, vcs: true } : {},
+                    }),
+                  };
+                }),
+            },
+          }),
+        ),
+        Effect.provideService(HostProcess.Environment, environment),
+      );
+      const result = yield* service
+        .cloneRepository({ destinationPath: destination, remoteUrl: url })
+        .pipe(Effect.provideService(HostProcess.Environment, environment));
+      assert.equal(result.cwd, destination);
+      assert.deepEqual(calls, [
+        ["--json", "--no-sync", "integration", "capabilities"],
+        [
+          "--json",
+          "--no-sync",
+          "clone",
+          "--resume",
+          "--require-repository-id",
+          `--cert=${cert}`,
+          "--",
+          "localhost:7743",
+          repository,
+          "interrupted",
+        ],
+      ]);
+    }).pipe(Effect.provide(NodeServices.layer)),
+);

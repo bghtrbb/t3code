@@ -294,6 +294,17 @@ export function createVcsEnvironmentAtoms<R, E>(
       label: "environment-data:vcs:read-refs",
       tag: WS_METHODS.vcsListRefs,
     }),
+    inspectTovio: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:vcs:tovio-inspect",
+      tag: WS_METHODS.vcsTovioInspect,
+    }),
+    mutateTovio: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:vcs:tovio-mutate",
+      tag: WS_METHODS.vcsTovioMutate,
+      scheduler: vcsCommandScheduler,
+      concurrency: vcsCommandConcurrency,
+      onSettled: invalidateRefs,
+    }),
     status: createEnvironmentSubscriptionAtomFamily(runtime, {
       label: "environment-data:vcs:status",
       idleTtlMs: VCS_STATUS_IDLE_TTL_MS,

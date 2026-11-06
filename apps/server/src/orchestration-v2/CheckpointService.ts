@@ -133,7 +133,9 @@ export interface CheckpointServiceV2Shape {
   readonly restore: (input: {
     readonly scope: OrchestrationV2CheckpointScope;
     readonly checkpoint: OrchestrationV2Checkpoint;
+    readonly expectedCurrentCheckpoint?: OrchestrationV2Checkpoint;
   }) => Effect.Effect<void, CheckpointServiceV2Error>;
+  readonly supportsLocalRestore: (cwd: string) => Effect.Effect<boolean>;
   readonly deleteStaleRefs: (input: {
     readonly scope: OrchestrationV2CheckpointScope;
     readonly checkpoints: ReadonlyArray<OrchestrationV2Checkpoint>;
@@ -244,14 +246,14 @@ export const layer: Layer.Layer<
     const withWorkspaceLock = <A, E, R>(cwd: string, effect: Effect.Effect<A, E, R>) =>
       workspaceLocks.withLock(cwd, effect);
 
-    const isGitCheckpointable = (cwd: string) =>
-      checkpointStore.isGitRepository(cwd).pipe(Effect.orElseSucceed(() => false));
+    const isCheckpointable = (cwd: string) =>
+      checkpointStore.isCheckpointable(cwd).pipe(Effect.orElseSucceed(() => false));
 
     const captureBaseline: CheckpointServiceV2Shape["captureBaseline"] = (input) =>
       withWorkspaceLock(
         input.scope.cwd,
         Effect.gen(function* () {
-          if (!(yield* isGitCheckpointable(input.scope.cwd))) {
+          if (!(yield* isCheckpointable(input.scope.cwd))) {
             return;
           }
 
@@ -303,7 +305,7 @@ export const layer: Layer.Layer<
               ordinalWithinScope: input.ordinalWithinScope,
             });
             const checkpointable =
-              input.forceMissing !== true && (yield* isGitCheckpointable(input.scope.cwd));
+              input.forceMissing !== true && (yield* isCheckpointable(input.scope.cwd));
             const available = checkpointable
               ? yield* checkpointStore
                   .hasCheckpointRef({
@@ -368,7 +370,7 @@ export const layer: Layer.Layer<
             ordinalWithinScope: Math.max(0, input.ordinalWithinScope - 1),
           });
 
-          if (input.forceMissing === true || !(yield* isGitCheckpointable(input.scope.cwd))) {
+          if (input.forceMissing === true || !(yield* isCheckpointable(input.scope.cwd))) {
             return makeCheckpoint({
               id: checkpointId,
               scope: input.scope,
@@ -517,6 +519,11 @@ export const layer: Layer.Layer<
             cwd: input.scope.cwd,
             checkpointRef: input.checkpoint.ref,
             fallbackToHead: false,
+            ...(input.expectedCurrentCheckpoint === undefined
+              ? {}
+              : {
+                  expectedCurrentCheckpointRef: input.expectedCurrentCheckpoint.ref,
+                }),
           });
           if (!restored) {
             return yield* new CheckpointRestoreError({
@@ -557,6 +564,9 @@ export const layer: Layer.Layer<
       );
 
     return CheckpointServiceV2.of({
+      supportsLocalRestore: Effect.fn("CheckpointServiceV2.supportsLocalRestore")((cwd) =>
+        checkpointStore.supportsLocalRestore(cwd).pipe(Effect.orElseSucceed(() => false)),
+      ),
       prepareRootRunScope: (input) =>
         makeRootRunScope({ ...input, idAllocator }).pipe(
           Effect.mapError(

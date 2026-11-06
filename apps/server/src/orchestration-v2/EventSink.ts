@@ -74,6 +74,8 @@ export interface EventSinkV2Shape {
       "driver" | "providerInstanceId" | "appThreadId" | "nativeThreadRef"
     >;
     readonly guardPendingUserInputCancellations?: boolean;
+    /** Remove the completed native rewind in the same commit as its projection. */
+    readonly completedNativeRewind?: ThreadId;
     readonly commandId?: CommandId;
     readonly events: ReadonlyArray<OrchestrationV2DomainEvent>;
   }) => Effect.Effect<ReadonlyArray<OrchestrationV2StoredEvent>, EventSinkV2Error>;
@@ -88,6 +90,7 @@ export interface EventSinkV2Shape {
       "driver" | "providerInstanceId" | "appThreadId" | "nativeThreadRef"
     >;
     readonly guardPendingUserInputCancellations?: boolean;
+    readonly completedNativeRewind?: ThreadId;
     readonly commandId?: CommandId;
     readonly events: ReadonlyArray<OrchestrationV2DomainEvent>;
     readonly effects: ReadonlyArray<EffectOutbox.PendingOrchestrationEffectV2>;
@@ -447,6 +450,12 @@ const layerBase: Layer.Layer<
             events: normalized,
           });
           const outcomes = yield* applyStoredEvents(committed);
+          if (input.completedNativeRewind !== undefined) {
+            yield* sql`
+              DELETE FROM native_checkpoint_rewind
+              WHERE thread_id = ${input.completedNativeRewind} AND phase = 'provider_done'
+            `;
+          }
           yield* effectOutbox.enqueue(input.effects);
           return { committed, outcomes };
         }).pipe(Effect.withTracerEnabled(false)),

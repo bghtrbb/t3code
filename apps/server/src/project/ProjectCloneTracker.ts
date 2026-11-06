@@ -31,6 +31,7 @@ import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 
 import * as SourceControlRepositoryService from "../sourceControl/SourceControlRepositoryService.ts";
+import { isTovioCloneUrl } from "../sourceControl/tovioClone.ts";
 
 export class ProjectCloneTracker extends Context.Service<
   ProjectCloneTracker,
@@ -352,7 +353,9 @@ export const make = Effect.gen(function* () {
           const after = yield* get(projectId);
           if (after?.phase === "done") return;
           if (after?.phase === "running") yield* finish(projectId, "cancelled", null);
-          yield* repositories.discardClone(tracked.input.destinationPath).pipe(Effect.ignore);
+          if (!isTovioCloneUrl(tracked.input.cloneUrl)) {
+            yield* repositories.discardClone(tracked.input.destinationPath).pipe(Effect.ignore);
+          }
         }),
       );
       return true;
@@ -369,7 +372,9 @@ export const make = Effect.gen(function* () {
       ) {
         return false;
       }
-      yield* repositories.discardClone(tracked.input.destinationPath);
+      if (!isTovioCloneUrl(tracked.input.cloneUrl)) {
+        yield* repositories.discardClone(tracked.input.destinationPath);
+      }
       const startedAt = yield* nowIso;
       yield* modify(projectId, (entry) => ({
         ...entry,
@@ -400,7 +405,7 @@ export const make = Effect.gen(function* () {
     // Git may have finished while the interrupt was landing; the project
     // is going away either way, but a complete checkout is the user's.
     const after = yield* get(projectId);
-    if (after?.phase !== "done") {
+    if (after?.phase !== "done" && !isTovioCloneUrl(tracked.input.cloneUrl)) {
       yield* repositories.discardClone(tracked.input.destinationPath).pipe(Effect.ignore);
     }
     yield* clearRetention(projectId);

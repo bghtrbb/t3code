@@ -16,6 +16,7 @@ export interface RestoreCheckpointInput {
   readonly cwd: string;
   readonly checkpointRef: CheckpointRef;
   readonly fallbackToHead?: boolean;
+  readonly expectedCurrentCheckpointRef?: CheckpointRef;
 }
 
 export interface DiffCheckpointsInput {
@@ -45,7 +46,8 @@ export interface DeleteCheckpointRefsInput {
 export class CheckpointStore extends Context.Service<
   CheckpointStore,
   {
-    readonly isGitRepository: (cwd: string) => Effect.Effect<boolean, CheckpointStoreError>;
+    readonly isCheckpointable: (cwd: string) => Effect.Effect<boolean, CheckpointStoreError>;
+    readonly supportsLocalRestore: (cwd: string) => Effect.Effect<boolean, CheckpointStoreError>;
 
     readonly captureCheckpoint: (
       input: CaptureCheckpointInput,
@@ -85,10 +87,17 @@ export const make = Effect.gen(function* () {
     return handle.driver.checkpoints satisfies VcsCheckpointOps;
   });
 
-  const isGitRepository: CheckpointStore["Service"]["isGitRepository"] = (cwd) =>
-    vcsRegistry
-      .detect({ cwd, requestedKind: "git" })
-      .pipe(Effect.map((repository) => repository !== null));
+  const isCheckpointable = Effect.fn("CheckpointStore.isCheckpointable")(function* (cwd: string) {
+    const handle = yield* vcsRegistry.detect({ cwd });
+    if (handle?.driver.tovio) return yield* handle.driver.tovio.canCheckpoint(cwd);
+    return handle?.kind === "git";
+  });
+  const supportsLocalRestore = Effect.fn("CheckpointStore.supportsLocalRestore")(function* (
+    cwd: string,
+  ) {
+    const handle = yield* vcsRegistry.detect({ cwd });
+    return handle?.driver.tovio ? yield* handle.driver.tovio.canCheckpoint(cwd) : false;
+  });
 
   const captureCheckpoint: CheckpointStore["Service"]["captureCheckpoint"] = Effect.fn(
     "captureCheckpoint",
@@ -133,7 +142,8 @@ export const make = Effect.gen(function* () {
   });
 
   return CheckpointStore.of({
-    isGitRepository,
+    isCheckpointable,
+    supportsLocalRestore,
     captureCheckpoint,
     hasCheckpointRef,
     restoreCheckpoint,

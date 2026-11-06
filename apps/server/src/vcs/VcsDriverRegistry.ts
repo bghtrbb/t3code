@@ -10,6 +10,7 @@ import * as Path from "effect/Path";
 import type { VcsDriverKind, VcsError, VcsRepositoryIdentity } from "@t3tools/contracts";
 import { VcsUnsupportedOperationError } from "@t3tools/contracts";
 import * as GitVcsDriver from "./GitVcsDriver.ts";
+import * as TovioVcsDriver from "./TovioVcsDriver.ts";
 import * as VcsProjectConfig from "./VcsProjectConfig.ts";
 import * as VcsDriver from "./VcsDriver.ts";
 
@@ -62,8 +63,10 @@ export const make = Effect.gen(function* () {
   const path = yield* Path.Path;
   const projectConfig = yield* VcsProjectConfig.VcsProjectConfig;
   const git = yield* GitVcsDriver.makeVcsDriver;
+  const tovio = (yield* TovioVcsDriver.enabled) ? yield* TovioVcsDriver.make : undefined;
   const drivers: Partial<Record<VcsDriverKind, VcsDriver.VcsDriver["Service"]>> = {
     git,
+    ...(tovio ? { tovio: tovio.driver } : {}),
   };
 
   const get: VcsDriverRegistry["Service"]["get"] = (kind) => {
@@ -107,23 +110,45 @@ export const make = Effect.gen(function* () {
       return yield* detectWithDriver(requestedKind, driver, input.cwd);
     }
 
-    return yield* detectWithDriver("git", git, input.cwd);
+    const gitHandle = yield* detectWithDriver("git", git, input.cwd);
+    if (!tovio) return gitHandle;
+    const nativeRoot = yield* tovio.findRoot(input.cwd);
+    if (nativeRoot === null) return gitHandle;
+    if (gitHandle) {
+      const relative = path.relative(nativeRoot, gitHandle.repository.rootPath);
+      if (
+        relative !== "" &&
+        relative !== ".." &&
+        !relative.startsWith(`..${path.sep}`) &&
+        !path.isAbsolute(relative)
+      )
+        return gitHandle;
+    }
+    return {
+      kind: "tovio",
+      repository: yield* tovio.open(nativeRoot),
+      driver: tovio.driver,
+    } satisfies VcsDriverHandle;
   });
 
   // Symlinks can put cwd outside root; then inspect cwd alone.
   const foldersBelowRoot = (cwd: string, rootPath: string) => {
     const relative = path.relative(path.resolve(rootPath), path.resolve(cwd));
-    if (relative.startsWith("..") || path.isAbsolute(relative)) return [cwd];
-    return Array.from({ length: relative.split(path.sep).length }, (_, levelsUp) =>
-      path.resolve(cwd, ...Array<string>(levelsUp).fill("..")),
+    if (relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative))
+      return [cwd];
+    return Array.from(
+      { length: relative === "" ? 1 : relative.split(path.sep).length + 1 },
+      (_, levelsUp) => path.resolve(cwd, ...Array<string>(levelsUp).fill("..")),
     );
   };
 
   const readDiskState = (cwd: string, repository: VcsRepositoryIdentity) =>
     Effect.all({
-      gitEntries: Effect.forEach(foldersBelowRoot(cwd, repository.rootPath), (folder) =>
-        fileSystem.exists(path.join(folder, ".git")),
-      ),
+      markers: Effect.forEach(foldersBelowRoot(cwd, repository.rootPath), (folder) =>
+        Effect.forEach(tovio ? [".git", ".tovio"] : [".git"], (marker) =>
+          fileSystem.exists(path.join(folder, marker)),
+        ),
+      ).pipe(Effect.map((entries) => entries.flat())),
       repositoryOnDisk: Effect.forEach(
         repository.metadataPath === null
           ? [cwd]
@@ -134,7 +159,7 @@ export const make = Effect.gen(function* () {
 
   const detectionCache = yield* Cache.makeWith<
     string,
-    { readonly handle: VcsDriverHandle; readonly gitEntries: ReadonlyArray<boolean> } | null,
+    { readonly handle: VcsDriverHandle; readonly markers: ReadonlyArray<boolean> } | null,
     VcsError
   >(
     (key) =>
@@ -143,7 +168,7 @@ export const make = Effect.gen(function* () {
         const handle = yield* detectResolvedKind(input);
         if (handle === null) return null;
         const disk = yield* readDiskState(input.cwd, handle.repository);
-        return { handle, gitEntries: disk?.gitEntries ?? [] };
+        return { handle, markers: disk?.markers ?? [] };
       }),
     {
       capacity: DETECTION_CACHE_CAPACITY,
@@ -163,8 +188,8 @@ export const make = Effect.gen(function* () {
       const disk = yield* readDiskState(input.cwd, cached.handle.repository);
       if (
         disk?.repositoryOnDisk &&
-        disk.gitEntries.length === cached.gitEntries.length &&
-        disk.gitEntries.every((exists, index) => exists === cached.gitEntries[index])
+        disk.markers.length === cached.markers.length &&
+        disk.markers.every((exists, index) => exists === cached.markers[index])
       ) {
         return cached.handle;
       }

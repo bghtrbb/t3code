@@ -3,6 +3,7 @@ import {
   CheckpointScopeId,
   latestProviderTurnForAttempt,
   type OrchestrationV2DomainEvent,
+  OrchestrationV2ProviderThreadJson,
   ProviderThreadId,
   ThreadId,
   VcsProcessExitError,
@@ -15,12 +16,14 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
+import * as SqlClient from "effect/sql/SqlClient";
 
 import * as GitWorkflowService from "../git/GitWorkflowService.ts";
 import type * as ServerConfig from "../config.ts";
 import type * as ServerSettings from "../serverSettings.ts";
 import { makeIsManagedWorktreePath } from "../worktreesDirectory.ts";
 import { withWorkspaceLease } from "../workspace/workspaceLease.ts";
+import { enabled as tovioEnabled } from "../vcs/TovioVcsDriver.ts";
 import {
   isCheckpointRestoreIsolated,
   SHARED_WORKSPACE_RESTORE_MESSAGE,
@@ -48,6 +51,8 @@ export class CheckpointRollbackExecutionError extends Schema.TaggedError<Checkpo
       "provider-turn-unavailable",
       "unexpected-failure",
       "shared-workspace",
+      "native-recovery-required",
+      "native-turn-active",
     ]),
     threadId: ThreadId,
     providerThreadId: ProviderThreadId,
@@ -65,6 +70,10 @@ export class CheckpointRollbackExecutionError extends Schema.TaggedError<Checkpo
         return `Provider turn for rollback target ${this.checkpointId} is unavailable on provider thread ${this.providerThreadId}.`;
       case "shared-workspace":
         return SHARED_WORKSPACE_RESTORE_MESSAGE;
+      case "native-turn-active":
+        return "Finish or interrupt the active turn before rewinding this TOVIO checkout.";
+      case "native-recovery-required":
+        return "An earlier TOVIO rewind needs recovery. Check the checkout and provider conversation before resuming this thread.";
       case "unexpected-failure":
         return ROLLBACK_FAILED_MESSAGE;
     }
@@ -72,6 +81,9 @@ export class CheckpointRollbackExecutionError extends Schema.TaggedError<Checkpo
 }
 
 const isCheckpointRollbackExecutionError = Schema.is(CheckpointRollbackExecutionError);
+const ProviderThreadJson = Schema.fromJsonString(OrchestrationV2ProviderThreadJson);
+const decodeProviderThread = Schema.decodeEffect(ProviderThreadJson);
+const encodeProviderThread = Schema.encodeEffect(ProviderThreadJson);
 const isVcsProcessExitError = Schema.is(VcsProcessExitError);
 const isCheckpointRestoreError = Schema.is(CheckpointRestoreError);
 const isRuntimePolicyAboveCeilingError = Schema.is(RuntimePolicyAboveCeilingError);
@@ -82,6 +94,8 @@ const isRuntimePolicyAboveCeilingError = Schema.is(RuntimePolicyAboveCeilingErro
  * output, so they fall back to the generic message.
  */
 export function rollbackFailureClientMessage(error: CheckpointRollbackExecutionError): string {
+  if (error.reason === "native-recovery-required" || error.reason === "native-turn-active")
+    return error.message;
   if (isRuntimePolicyAboveCeilingError(error.cause)) return error.cause.message;
   const restoreCause = isCheckpointRestoreError(error.cause) ? error.cause.cause : undefined;
   return isVcsProcessExitError(restoreCause) && restoreCause.detail === GIT_INDEX_LOCKED_DETAIL
@@ -120,6 +134,7 @@ export const layer: Layer.Layer<
   | ServerConfig.ServerConfig
   | ServerSettings.ServerSettingsService
   | ThreadCommandExecutor.ThreadCommandExecutor
+  | SqlClient.SqlClient
 > = Layer.effect(
   CheckpointRollbackServiceV2,
   Effect.gen(function* () {
@@ -134,6 +149,7 @@ export const layer: Layer.Layer<
     const projects = yield* ProjectStore.ProjectStoreV2;
     const path = yield* Path.Path;
     const threadCommands = yield* ThreadCommandExecutor.ThreadCommandExecutor;
+    const sql = yield* SqlClient.SqlClient;
     const isManagedWorktreePath = yield* makeIsManagedWorktreePath;
 
     const execute = Effect.fn("orchestrationV2.checkpointRollback.execute")(function* (input: {
@@ -216,6 +232,46 @@ export const layer: Layer.Layer<
             });
 
       const { worktreePath, branch } = context.thread;
+      const nativeLocal =
+        worktreePath === null &&
+        (yield* tovioEnabled) &&
+        (yield* checkpoints.supportsLocalRestore(scope.cwd));
+      const recoveryRequired = () =>
+        new CheckpointRollbackExecutionError({
+          reason: "native-recovery-required",
+          threadId: input.threadId,
+          providerThreadId: input.providerThreadId,
+          checkpointId: input.checkpointId,
+        });
+      const readRewind = () =>
+        sql<{
+          readonly target_checkpoint_id: string;
+          readonly source_checkpoint_id: string;
+          readonly provider_thread_id: string;
+          readonly phase: "files_pending" | "provider_pending" | "provider_done";
+          readonly provider_thread_json: string | null;
+        }>`SELECT * FROM native_checkpoint_rewind WHERE thread_id = ${input.threadId}`;
+      const pendingRewind = worktreePath === null ? (yield* readRewind())[0] : undefined;
+      if (
+        pendingRewind?.phase === "provider_pending" ||
+        (pendingRewind && (!nativeLocal || input.restoreFiles === false))
+      ) {
+        return yield* recoveryRequired();
+      }
+      const restoreNativeFiles = nativeLocal && input.restoreFiles !== false;
+      const activeRuns = restoreNativeFiles
+        ? (yield* projections.getThreadRecords(input.threadId, ["runs"], {
+            runStatuses: ["preparing", "starting", "running", "waiting"],
+          })).runs
+        : [];
+      if (activeRuns.length > 0) {
+        return yield* new CheckpointRollbackExecutionError({
+          reason: "native-turn-active",
+          threadId: input.threadId,
+          providerThreadId: input.providerThreadId,
+          checkpointId: input.checkpointId,
+        });
+      }
       // Recreated only where the server would have made it, as turn start does.
       if (
         worktreePath != null &&
@@ -241,6 +297,7 @@ export const layer: Layer.Layer<
           projections,
           projects,
           path,
+          allowLocal: nativeLocal,
         }))
       ) {
         return yield* new CheckpointRollbackExecutionError({
@@ -251,26 +308,30 @@ export const layer: Layer.Layer<
         });
       }
 
-      const modelSelection = context.thread.modelSelection;
-      const resolvedRuntimePolicy = yield* runtimePolicy.resolve({
-        thread: context.thread,
-        modelSelection,
-      });
-      const existingSession = context.providerSession;
-      const session = yield* sessions.open({
-        threadId: input.threadId,
-        providerSessionId: providerThread.providerSessionId,
-        modelSelection,
-        runtimePolicy: resolvedRuntimePolicy,
-        ...(existingSession === undefined ? {} : { resumeFromSession: existingSession }),
-        ...(providerThread.nativeThreadRef?.nativeId == null
-          ? {}
-          : { initialNativeThreadId: providerThread.nativeThreadRef.nativeId }),
-        ...(providerThread.nativeMetadata?.itemIdentityVersion === undefined
-          ? {}
-          : {
-              initialProviderItemIdentityVersion: providerThread.nativeMetadata.itemIdentityVersion,
-            }),
+      const providerSessionId = providerThread.providerSessionId;
+      const openSession = Effect.gen(function* () {
+        const modelSelection = context.thread.modelSelection;
+        const resolvedRuntimePolicy = yield* runtimePolicy.resolve({
+          thread: context.thread,
+          modelSelection,
+        });
+        const existingSession = context.providerSession;
+        return yield* sessions.open({
+          threadId: input.threadId,
+          providerSessionId,
+          modelSelection,
+          runtimePolicy: resolvedRuntimePolicy,
+          ...(existingSession === undefined ? {} : { resumeFromSession: existingSession }),
+          ...(providerThread.nativeThreadRef?.nativeId == null
+            ? {}
+            : { initialNativeThreadId: providerThread.nativeThreadRef.nativeId }),
+          ...(providerThread.nativeMetadata?.itemIdentityVersion === undefined
+            ? {}
+            : {
+                initialProviderItemIdentityVersion:
+                  providerThread.nativeMetadata.itemIdentityVersion,
+              }),
+        });
       });
 
       // Rolled-back turns remain in audit history but no longer exist in the provider conversation.
@@ -281,16 +342,58 @@ export const layer: Layer.Layer<
           (turn.runAttemptId === null || !rolledBackAttemptIds.has(turn.runAttemptId)),
       );
 
-      const snapshot =
-        runsToRollback.length === 0
-          ? { providerThread }
-          : yield* session.rollbackThread({
-              providerThread,
-              target: rollbackTarget,
-              providerThreadTurns,
-            });
-      if (input.restoreFiles !== false) yield* checkpoints.restore({ scope, checkpoint });
-      if (staleCheckpoints.length > 0) {
+      const rollbackProvider = Effect.fn("CheckpointRollbackService.rollbackProvider")(function* (
+        session: Effect.Success<typeof openSession>,
+      ) {
+        if (runsToRollback.length === 0) return { providerThread };
+        return yield* session.rollbackThread({
+          providerThread,
+          target: rollbackTarget,
+          providerThreadTurns,
+        });
+      });
+      const snapshot = yield* restoreNativeFiles
+        ? Effect.gen(function* () {
+            const latest = staleCheckpoints.at(-1) ?? checkpoint;
+            yield* sql`
+          INSERT INTO native_checkpoint_rewind
+            (thread_id, target_checkpoint_id, source_checkpoint_id, provider_thread_id, phase)
+          VALUES (${input.threadId}, ${checkpoint.id}, ${latest.id}, ${providerThread.id}, 'files_pending')
+          ON CONFLICT(thread_id) DO NOTHING
+        `;
+            const [entry] = yield* readRewind();
+            if (
+              !entry ||
+              entry.target_checkpoint_id !== checkpoint.id ||
+              entry.source_checkpoint_id !== latest.id ||
+              entry.provider_thread_id !== providerThread.id ||
+              entry.phase === "provider_pending"
+            ) {
+              return yield* recoveryRequired();
+            }
+            if (entry.phase === "provider_done") {
+              if (entry.provider_thread_json === null) return yield* recoveryRequired();
+              const restoredThread = yield* decodeProviderThread(entry.provider_thread_json);
+              return { providerThread: restoredThread };
+            }
+            const session = yield* openSession;
+            yield* checkpoints.restore({ scope, checkpoint, expectedCurrentCheckpoint: latest });
+            yield* sql`UPDATE native_checkpoint_rewind SET phase = 'provider_pending' WHERE thread_id = ${input.threadId}`;
+            const restored = yield* rollbackProvider(session).pipe(
+              Effect.mapError(recoveryRequired),
+            );
+            const encoded = yield* encodeProviderThread(restored.providerThread);
+            yield* sql`
+          UPDATE native_checkpoint_rewind SET phase = 'provider_done', provider_thread_json = ${encoded}
+          WHERE thread_id = ${input.threadId}
+        `;
+            return restored;
+          })
+        : openSession.pipe(Effect.flatMap(rollbackProvider));
+
+      if (!restoreNativeFiles && input.restoreFiles !== false)
+        yield* checkpoints.restore({ scope, checkpoint });
+      if (!restoreNativeFiles && staleCheckpoints.length > 0) {
         yield* checkpoints.deleteStaleRefs({ scope, checkpoints: staleCheckpoints });
       }
 
@@ -363,9 +466,17 @@ export const layer: Layer.Layer<
               );
             }
           }
-          yield* eventSink.write({ events });
+          yield* eventSink.write({
+            events,
+            ...(restoreNativeFiles ? { completedNativeRewind: input.threadId } : {}),
+          });
         }),
       );
+      if (restoreNativeFiles && staleCheckpoints.length > 0) {
+        yield* checkpoints
+          .deleteStaleRefs({ scope, checkpoints: staleCheckpoints })
+          .pipe(Effect.ignore({ log: true }));
+      }
     });
 
     return CheckpointRollbackServiceV2.of({
@@ -374,9 +485,19 @@ export const layer: Layer.Layer<
         function* (input) {
           // Storage cleanup removes worktrees under the same lease.
           const thread = yield* projections.getThread(input.threadId);
-          yield* thread.worktreePath === null
-            ? execute(input)
-            : withWorkspaceLease(path.resolve(thread.worktreePath), execute(input));
+          if (thread.worktreePath !== null) {
+            yield* withWorkspaceLease(path.resolve(thread.worktreePath), execute(input));
+          } else if (yield* tovioEnabled) {
+            const { scope } = yield* projections.getCheckpointRollbackContext(
+              input.threadId,
+              input,
+            );
+            yield* scope
+              ? withWorkspaceLease(yield* fileSystem.realPath(scope.cwd), execute(input))
+              : execute(input);
+          } else {
+            yield* execute(input);
+          }
         },
         (effect, input) =>
           effect.pipe(

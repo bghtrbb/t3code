@@ -1,4 +1,5 @@
 import { ThreadDetailsControl } from "./chat/ThreadDetailsControl";
+import { TovioActionsControl } from "./TovioActionsControl";
 import { useAtomMount, useAtomValue } from "@effect/atom-react";
 import {
   AuthOrchestrationOperateScope,
@@ -1484,6 +1485,19 @@ export default function GitActionsControl({
   );
 
   if (!gitCwd) return null;
+  if (gitStatus?.tovio && activeEnvironmentId !== null) {
+    return (
+      <TovioActionsControl
+        key={successScopeKey}
+        cwd={gitCwd}
+        environmentId={activeEnvironmentId}
+        status={gitStatus.tovio}
+        canWrite={canWriteSourceControl}
+        showActions={showActions}
+        showChanges={showChanges}
+      />
+    );
+  }
 
   return (
     <>

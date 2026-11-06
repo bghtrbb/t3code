@@ -57,6 +57,8 @@ import {
   ORCHESTRATION_PROTOCOL_QUERY_PARAM,
   CLIENT_CAPABILITIES_QUERY_PARAM,
   SETTINGS_SECRET_REFERENCES_CAPABILITY,
+  TOVIO_SOURCE_CONTROL_CAPABILITY,
+  TOVIO_FORGE_PROVIDER_KIND,
   ORCHESTRATION_PROTOCOL_VERSION,
   OrchestrationV2DispatchCommandError,
   OrchestrationV2GetShellSnapshotError,
@@ -256,6 +258,7 @@ import * as SourceControlBuiltInDrivers from "./sourceControl/builtInDrivers.ts"
 import * as SourceControlProviderRegistry from "./sourceControl/SourceControlProviderRegistry.ts";
 import * as GitVcsDriver from "./vcs/GitVcsDriver.ts";
 import * as VcsDriverRegistry from "./vcs/VcsDriverRegistry.ts";
+import * as TovioWorkflow from "./vcs/TovioWorkflow.ts";
 import * as VcsProjectConfig from "./vcs/VcsProjectConfig.ts";
 import * as PairingGrantStore from "./auth/PairingGrantStore.ts";
 import * as SessionStore from "./auth/SessionStore.ts";
@@ -744,7 +747,10 @@ function hasCompatibleOrchestrationProtocol(url: URL): boolean {
 
 function readSettingsClient(url: URL) {
   const capabilities = url.searchParams.get(CLIENT_CAPABILITIES_QUERY_PARAM)?.split(",") ?? [];
-  return { secretReferences: capabilities.includes(SETTINGS_SECRET_REFERENCES_CAPABILITY) };
+  return {
+    secretReferences: capabilities.includes(SETTINGS_SECRET_REFERENCES_CAPABILITY),
+    tovioSourceControl: capabilities.includes(TOVIO_SOURCE_CONTROL_CAPABILITY),
+  };
 }
 
 function shouldUseBoundedThreadSnapshot(input: {
@@ -1393,11 +1399,26 @@ export const layerWsRpc = (
   clientAnalyticsProps: Readonly<Record<string, unknown>>,
   serverBrowser: ServerBrowser.ServerBrowser["Service"],
   reportProfiles: ServerBrowser.ProfileReporter,
-  settingsClient: { readonly secretReferences: boolean },
+  settingsClient: { readonly secretReferences: boolean; readonly tovioSourceControl?: boolean },
 ) =>
   Layer.effectContext(
     Effect.gen(function* () {
       const currentSessionId = currentSession.sessionId;
+      const tovioWorkflow = yield* TovioWorkflow.make;
+      const knownWorkspaces = yield* KnownWorkspaces.KnownWorkspaces;
+      const filterNativeStatus = <
+        T extends { readonly tovio?: { readonly root: string } | undefined },
+      >(
+        status: T,
+      ): Effect.Effect<T> => {
+        const { tovio } = status;
+        if (!tovio) return Effect.succeed(status);
+        const legacy = { ...status, tovio: undefined };
+        if (!settingsClient.tovioSourceControl) return Effect.succeed(legacy);
+        return knownWorkspaces
+          .assertContains(tovio.root)
+          .pipe(Effect.match({ onSuccess: () => status, onFailure: () => legacy }));
+      };
       const sql = yield* SqlClient.SqlClient;
       const threadManagement = yield* ThreadManagementService.ThreadManagementService;
       const intakeContext = yield* Effect.context<
@@ -2698,7 +2719,22 @@ export const layerWsRpc = (
               : serverSettings.updateProviderInstance(providerInstanceMutation, nextPatch);
             return ServerSettings.redactServerSettingsForClient(settings, settingsClient);
           }),
-        [WS_METHODS.serverDiscoverSourceControl]: (_input) => sourceControlDiscovery.discover,
+        [WS_METHODS.serverDiscoverSourceControl]: (_input) =>
+          sourceControlDiscovery.discover.pipe(
+            Effect.map((result) =>
+              settingsClient.tovioSourceControl
+                ? result
+                : {
+                    ...result,
+                    versionControlSystems: result.versionControlSystems.filter(
+                      ({ kind }) => kind !== "tovio",
+                    ),
+                    sourceControlProviders: result.sourceControlProviders.filter(
+                      ({ kind }) => kind !== TOVIO_FORGE_PROVIDER_KIND,
+                    ),
+                  },
+            ),
+          ),
         [WS_METHODS.serverGetTraceDiagnostics]: (_input) =>
           TraceDiagnostics.readTraceDiagnostics({
             traceFilePath: config.serverTracePath,
@@ -3110,14 +3146,36 @@ export const layerWsRpc = (
           }),
         [WS_METHODS.assetsPersistChatAttachments]: (input) =>
           persistChatAttachments(input).pipe(Effect.map((attachments) => ({ attachments }))),
-        [WS_METHODS.subscribeVcsStatus]: (input) => vcsStatusBroadcaster.streamStatus(input),
+        [WS_METHODS.subscribeVcsStatus]: (input) =>
+          vcsStatusBroadcaster.streamStatus(input).pipe(
+            Stream.mapEffect((event) =>
+              Effect.gen(function* () {
+                if (event._tag === "remoteUpdated") return event;
+                const local = yield* filterNativeStatus(event.local);
+                return { ...event, local };
+              }),
+            ),
+          ),
         [WS_METHODS.subscribeWorktreeSetup]: (input) => worktreeSetupTracker.stream(input.threadId),
         [WS_METHODS.worktreeSetupCancel]: (input) =>
           worktreeSetupTracker
             .cancel(input.threadId)
             .pipe(Effect.map((cancelled) => ({ cancelled }))),
         [WS_METHODS.vcsRefreshStatus]: (input) =>
-          vcsStatusBroadcaster.refreshStatus(input.cwd, { localOnly: input.localOnly ?? false }),
+          vcsStatusBroadcaster
+            .refreshStatus(input.cwd, { localOnly: input.localOnly ?? false })
+            .pipe(Effect.flatMap(filterNativeStatus)),
+        [WS_METHODS.vcsTovioInspect]: (input) => tovioWorkflow.inspect(input),
+        [WS_METHODS.vcsTovioMutate]: (input) =>
+          tovioWorkflow
+            .mutate(input)
+            .pipe(
+              Effect.tap(() =>
+                vcsStatusBroadcaster
+                  .refreshLocalStatus(input.cwd)
+                  .pipe(Effect.ignore({ log: true })),
+              ),
+            ),
         [WS_METHODS.vcsPull]: (input) =>
           gitWorkflow.pullCurrentBranch(input.cwd).pipe(
             Effect.matchCauseEffect({

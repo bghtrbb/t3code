@@ -26,6 +26,7 @@ import * as Predicate from "effect/Predicate";
 import * as Schema from "effect/Schema";
 
 import * as ServerConfig from "../config.ts";
+import { enabled as tovioEnabled } from "../vcs/TovioVcsDriver.ts";
 import { withWorkspaceLease } from "../workspace/workspaceLease.ts";
 import * as GitWorkflowService from "../git/GitWorkflowService.ts";
 import * as ProjectService from "../project/ProjectService.ts";
@@ -1729,9 +1730,18 @@ export const layer: Layer.Layer<
           // Storage cleanup removes worktrees under the same lease. Only startup
           // holds it; the provider turn runs after it is released.
           const { thread } = yield* projectionStore.getThreadRecords(input.threadId, []);
-          const providerTurn = yield* thread.worktreePath === null
+          let checkout = thread.worktreePath;
+          if (checkout === null && (yield* tovioEnabled)) {
+            const project = yield* projects
+              .getById(thread.projectId)
+              .pipe(Effect.map(Option.getOrUndefined));
+            if (project && (yield* fileSystem.exists(path.join(project.workspaceRoot, ".tovio")))) {
+              checkout = yield* fileSystem.realPath(project.workspaceRoot);
+            }
+          }
+          const providerTurn = yield* checkout === null
             ? start(input)
-            : withWorkspaceLease(path.resolve(thread.worktreePath), start(input));
+            : withWorkspaceLease(path.resolve(checkout), start(input));
           if (providerTurn !== undefined) yield* providerTurn;
         },
         (effect, input) =>
