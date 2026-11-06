@@ -269,7 +269,15 @@ export const make = Effect.gen(function* () {
       ["integration", "files"],
       Files,
     );
-    const relative = path.relative(root, path.resolve(cwd)).split(path.sep).join("/");
+    let workspacePath = path.resolve(cwd);
+    if (platform === "win32") {
+      const onDiskPath = yield* fs
+        .realPath(workspacePath)
+        .pipe(Effect.orElseSucceed(() => workspacePath));
+      // Use the on-disk casing without redirecting the scope through a junction.
+      if (path.relative(workspacePath, onDiskPath) === "") workspacePath = onDiskPath;
+    }
+    const relative = path.relative(root, workspacePath).split(path.sep).join("/");
     const selected =
       relative === ""
         ? paths

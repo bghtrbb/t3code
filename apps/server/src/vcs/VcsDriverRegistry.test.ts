@@ -241,7 +241,8 @@ describe("VcsDriverRegistry", () => {
         const path = yield* Path.Path;
         const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-tovio-cli-" });
         const environment = yield* HostProcess.Environment;
-        const delimiter = (yield* HostProcess.Platform) === "win32" ? ";" : ":";
+        const platform = yield* HostProcess.Platform;
+        const delimiter = platform === "win32" ? ";" : ":";
         yield* Effect.gen(function* () {
           const registry = yield* VcsDriverRegistry.VcsDriverRegistry;
           const driver = yield* registry.get("tovio");
@@ -253,6 +254,15 @@ describe("VcsDriverRegistry", () => {
           const file = path.join(root, "sample.txt");
           yield* fs.writeFileString(file, "before\n");
           assert.isTrue((yield* driver.listWorkspaceFiles(root)).paths.includes("sample.txt"));
+          if (platform === "win32") {
+            const nested = path.join(root, "MixedCase");
+            yield* fs.makeDirectory(nested);
+            yield* fs.writeFileString(path.join(nested, "child.txt"), "nested\n");
+            assert.deepEqual(
+              (yield* driver.listWorkspaceFiles(path.join(root, "mixedcase"))).paths,
+              ["child.txt"],
+            );
+          }
           assert.isFalse((yield* native.status(root)).clean);
           const diff = yield* native.inspect({ cwd: root, operation: "diff" });
           assert.equal(diff.operation, "diff");
