@@ -148,6 +148,7 @@ import {
   VcsStatusResult,
   VcsStatusStreamEvent,
 } from "./git.ts";
+import { TovioInspectInput, TovioInspectResult, TovioMutateInput } from "./vcs.ts";
 import {
   ReviewBranchCommitsInput,
   ReviewBranchCommitsResult,
@@ -451,6 +452,8 @@ export const WS_METHODS = {
 
   vcsPull: "vcs.pull",
   vcsRefreshStatus: "vcs.refreshStatus",
+  vcsTovioInspect: "vcs.tovio.inspect",
+  vcsTovioMutate: "vcs.tovio.mutate",
   vcsListRefs: "vcs.listRefs",
   vcsCreateWorktree: "vcs.createWorktree",
   vcsRemoveWorktree: "vcs.removeWorktree",
@@ -1467,6 +1470,18 @@ const WsVcsRefreshStatusRpc = Rpc.make(WS_METHODS.vcsRefreshStatus, {
   error: Schema.Union([GitManagerServiceError, EnvironmentAuthorizationError]),
 });
 
+const WsVcsTovioInspectRpc = Rpc.make(WS_METHODS.vcsTovioInspect, {
+  payload: TovioInspectInput,
+  success: TovioInspectResult,
+  error: Schema.Union([VcsError, EnvironmentAuthorizationError]),
+});
+
+const WsVcsTovioMutateRpc = Rpc.make(WS_METHODS.vcsTovioMutate, {
+  payload: TovioMutateInput,
+  success: Schema.Void,
+  error: Schema.Union([VcsError, EnvironmentAuthorizationError]),
+});
+
 const WsSubscribeWorktreeSetupRpc = Rpc.make(WS_METHODS.subscribeWorktreeSetup, {
   payload: WorktreeSetupSubscribeInput,
   success: WorktreeSetupStreamEvent,
@@ -2143,6 +2158,8 @@ export const WsRpcGroup = RpcGroup.make(
   WsWorktreeSetupCancelRpc,
   WsVcsPullRpc,
   WsVcsRefreshStatusRpc,
+  WsVcsTovioInspectRpc,
+  WsVcsTovioMutateRpc,
   WsGitRunStackedActionRpc,
   WsGitResolvePullRequestRpc,
   WsGitPreparePullRequestThreadRpc,

@@ -277,7 +277,7 @@ it.layer(layerProjectionStoreTest)("CheckpointCaptureServiceV2", (it) => {
                         NodeCrypto.layer,
                         Layer.mock(CheckpointStore.CheckpointStore)({
                           listAuthoredPaths: () => Effect.succeed(null),
-                          isGitRepository: () => Effect.succeed(true),
+                          isCheckpointable: () => Effect.succeed(true),
                           captureCheckpoint: () => Effect.void,
                           hasCheckpointRef: () =>
                             Effect.fail(
@@ -870,7 +870,7 @@ it.layer(layerProjectionStoreTest)("CheckpointCaptureServiceV2", (it) => {
                   IdAllocator.layer,
                   NodeCrypto.layer,
                   Layer.mock(CheckpointStore.CheckpointStore)({
-                    isGitRepository: gitUnavailable,
+                    isCheckpointable: gitUnavailable,
                     captureCheckpoint: gitUnavailable,
                     hasCheckpointRef: gitUnavailable,
                   }),

@@ -1,8 +1,118 @@
 import * as Schema from "effect/Schema";
 import { NonNegativeInt, TrimmedNonEmptyString } from "./baseSchemas.ts";
 
-export const VcsDriverKind = Schema.Literals(["git", "jj", "unknown"]);
+export const VcsDriverKind = Schema.Literals(["git", "jj", "tovio", "unknown"]);
 export type VcsDriverKind = typeof VcsDriverKind.Type;
+
+export const TovioStatus = Schema.Struct({
+  root: Schema.String,
+  lane: Schema.String,
+  change: Schema.NullOr(Schema.String),
+  head: Schema.NullOr(Schema.String),
+  clean: Schema.Boolean,
+  behind_tip: Schema.Boolean,
+  changes: Schema.Array(Schema.Struct({ path: Schema.String, status: Schema.String })),
+  conflicts: Schema.Array(Schema.Struct({ path: Schema.String })),
+});
+export type TovioStatus = typeof TovioStatus.Type;
+
+const TovioProposalId = TrimmedNonEmptyString.check(
+  Schema.isPattern(/^prop:[a-zA-Z0-9._-]{1,128}$/u),
+);
+const TovioDigest = Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/u));
+const TovioTarget = TrimmedNonEmptyString.check(Schema.isMaxLength(256));
+
+export const TovioProposal = Schema.Struct({
+  id: TovioProposalId,
+  change_id: Schema.String,
+  state: Schema.String,
+  target: Schema.String,
+  version: Schema.Int,
+});
+export const TovioPinnedProposal = Schema.Struct({
+  ...TovioProposal.fields,
+  revision: Schema.Int,
+  commit: TovioDigest,
+  base: TovioDigest,
+  origin: TovioDigest,
+});
+export const TovioReview = Schema.Struct({
+  files: Schema.Array(
+    Schema.Struct({
+      path: Schema.String,
+      kind: Schema.String,
+      marker: Schema.String,
+      hunks: Schema.optional(
+        Schema.Array(Schema.Struct({ sign: Schema.String, text: Schema.String })),
+      ),
+    }),
+  ),
+  conflicted: Schema.Array(Schema.String),
+});
+
+export const TovioInspectInput = Schema.Union([
+  Schema.Struct({ cwd: TrimmedNonEmptyString, operation: Schema.Literals(["lanes", "diff"]) }),
+  Schema.Struct({
+    cwd: TrimmedNonEmptyString,
+    operation: Schema.Literal("proposals"),
+    target: TovioTarget,
+  }),
+  Schema.Struct({
+    cwd: TrimmedNonEmptyString,
+    operation: Schema.Literal("review"),
+    proposal: TovioProposalId,
+  }),
+]);
+export type TovioInspectInput = typeof TovioInspectInput.Type;
+
+export const TovioLane = Schema.Struct({
+  name: Schema.String,
+  target: Schema.NullOr(Schema.String),
+  current: Schema.Boolean,
+});
+
+export const TovioInspectResult = Schema.Union([
+  Schema.Struct({ operation: Schema.Literal("lanes"), lanes: Schema.Array(TovioLane) }),
+  Schema.Struct({ operation: Schema.Literal("diff"), changes: Schema.Array(Schema.String) }),
+  Schema.Struct({
+    operation: Schema.Literal("proposals"),
+    proposals: Schema.Array(TovioProposal),
+  }),
+  Schema.Struct({
+    operation: Schema.Literal("review"),
+    proposal: TovioPinnedProposal,
+    review: TovioReview,
+    webUrl: Schema.optional(Schema.String),
+  }),
+]);
+export type TovioInspectResult = typeof TovioInspectResult.Type;
+
+export const TovioMutateInput = Schema.Struct({
+  cwd: TrimmedNonEmptyString,
+  action: Schema.Union([
+    Schema.Struct({
+      kind: Schema.Literal("commit"),
+      message: TrimmedNonEmptyString.check(Schema.isMaxLength(8_192)),
+    }),
+    Schema.Struct({
+      kind: Schema.Literals(["createLane", "switchLane"]),
+      lane: TrimmedNonEmptyString.check(Schema.isMaxLength(256)),
+    }),
+    Schema.Struct({ kind: Schema.Literals(["pull", "push"]) }),
+    Schema.Struct({
+      kind: Schema.Literal("propose"),
+      change: TrimmedNonEmptyString.check(Schema.isMaxLength(64)),
+      target: TovioTarget,
+      requestId: Schema.String.check(Schema.isPattern(/^prop:[a-f0-9]{32}$/u)),
+    }),
+    Schema.Struct({
+      kind: Schema.Literal("decide"),
+      proposal: TovioPinnedProposal,
+      decision: Schema.Literals(["approve", "request-changes"]),
+    }),
+  ]),
+});
+export type TovioMutateInput = typeof TovioMutateInput.Type;
 
 export const VcsFreshnessSource = Schema.Literals([
   "live-local",

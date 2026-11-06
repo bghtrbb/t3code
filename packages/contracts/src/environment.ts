@@ -19,6 +19,7 @@ export const ORCHESTRATION_PROTOCOL_HEADER = "x-t3-orchestration-protocol";
 export const CLIENT_CAPABILITIES_QUERY_PARAM = "clientCapabilities";
 /** Secret fields may hold a secret provider reference instead of a string. */
 export const SETTINGS_SECRET_REFERENCES_CAPABILITY = "settingsSecretReferences";
+export const TOVIO_SOURCE_CONTROL_CAPABILITY = "tovioSourceControlV1";
 
 export const ExecutionEnvironmentPlatformOs = Schema.Literals([
   "darwin",

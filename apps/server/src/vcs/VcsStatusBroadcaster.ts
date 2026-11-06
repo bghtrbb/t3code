@@ -414,6 +414,7 @@ export const make = Effect.gen(function* () {
     cwd: string,
     options?: Parameters<GitWorkflowService.GitWorkflowService["Service"]["remoteStatus"]>[1],
   ) {
+    if ((yield* getCachedStatus(cwd))?.local?.value.tovio) return null;
     const branch = yield* workflow.currentBranch(cwd);
     // GitManager's remote TTL cache is keyed by cwd, not the checked-out branch.
     yield* workflow.invalidateRemoteStatus(cwd);
@@ -742,17 +743,17 @@ export const make = Effect.gen(function* () {
         const initialLocal = yield* getOrLoadLocalStatus(cwd);
         const cachedStatus = yield* getCachedStatus(cwd);
         const initialRemote = cachedStatus?.remote?.value ?? null;
-        if (input.includeRemote !== false) {
+        const includeRemote = input.includeRemote !== false && initialLocal.tovio === undefined;
+        if (includeRemote) {
           yield* retainRemotePoller(
             cwd,
             input.cwd,
             cachedStatus?.remote === null || cachedStatus?.remote === undefined,
           );
         }
-        const release =
-          input.includeRemote === false
-            ? Effect.void
-            : releaseRemotePoller(cwd, input.cwd).pipe(Effect.ignore, Effect.asVoid);
+        const release = !includeRemote
+          ? Effect.void
+          : releaseRemotePoller(cwd, input.cwd).pipe(Effect.ignore, Effect.asVoid);
 
         return Stream.concat(
           Stream.make({

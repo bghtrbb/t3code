@@ -2,6 +2,7 @@ import {
   type SourceControlDiscoveryResult,
   type VcsDiscoveryItem,
   type VcsDriverKind,
+  TOVIO_FORGE_PROVIDER_KIND,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
@@ -10,6 +11,7 @@ import * as Option from "effect/Option";
 
 import * as ServerConfig from "../config.ts";
 import * as VcsProcess from "../vcs/VcsProcess.ts";
+import * as TovioVcsDriver from "../vcs/TovioVcsDriver.ts";
 import {
   detailFromCause,
   firstNonEmptyLine,
@@ -73,6 +75,24 @@ export const make = Effect.gen(function* () {
   const config = yield* ServerConfig.ServerConfig;
   const process = yield* VcsProcess.VcsProcess;
   const sourceControlProviders = yield* SourceControlProviderRegistry.SourceControlProviderRegistry;
+  const tovio = (yield* TovioVcsDriver.enabled) ? yield* TovioVcsDriver.make : undefined;
+
+  const tovioProbe = tovio?.probe(config.cwd).pipe(
+    Effect.match({
+      onSuccess: (capabilities) => ({
+        status: "available" as const,
+        version: Option.some("Integration v1"),
+        detail: Option.none(),
+        forge: capabilities.forge_review === true,
+      }),
+      onFailure: (error) => ({
+        status: "missing" as const,
+        version: Option.none(),
+        detail: Option.some(error.message),
+        forge: false,
+      }),
+    }),
+  );
 
   const probe = <Kind extends VcsDriverKind>(
     input: VcsProbe & { readonly kind: Kind },
@@ -131,7 +151,46 @@ export const make = Effect.gen(function* () {
         { concurrency: "unbounded" },
       ),
       sourceControlProviders: sourceControlProviders.discover,
-    }),
+      tovio: tovioProbe ?? Effect.succeed(null),
+    }).pipe(
+      Effect.map(({ versionControlSystems, sourceControlProviders: providers, tovio }) => {
+        if (!tovio) return { versionControlSystems, sourceControlProviders: providers };
+        const { forge, ...probeResult } = tovio;
+        return {
+          versionControlSystems: [
+            ...versionControlSystems,
+            {
+              ...probeResult,
+              kind: "tovio" as const,
+              label: "TOVIO",
+              executable: "tovio",
+              implemented: true,
+              installHint: "Install a TOVIO CLI with integration contract v1 on the server.",
+            },
+          ],
+          sourceControlProviders: [
+            ...providers,
+            {
+              kind: TOVIO_FORGE_PROVIDER_KIND,
+              label: "Tovio Cloud",
+              executable: "tovio",
+              status: forge ? ("available" as const) : ("missing" as const),
+              version: forge ? probeResult.version : Option.none(),
+              installHint: "Install a TOVIO CLI with Tovio Cloud review support on the server.",
+              detail: probeResult.detail,
+              auth: {
+                status: "unknown" as const,
+                account: Option.none(),
+                host: Option.none(),
+                detail: Option.some(
+                  "Tovio Cloud uses the project's configured origin and the server's TOVIO identity.",
+                ),
+              },
+            },
+          ],
+        };
+      }),
+    ),
   });
 });
 

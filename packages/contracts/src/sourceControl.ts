@@ -8,6 +8,7 @@ export const SourceControlProviderKind = TrimmedNonEmptyString.check(
   Schema.isPattern(/^[a-z][a-z0-9-]*$/),
 ).pipe(Schema.brand("SourceControlProviderKind"));
 export type SourceControlProviderKind = typeof SourceControlProviderKind.Type;
+export const TOVIO_FORGE_PROVIDER_KIND = SourceControlProviderKind.make("tovio-forge");
 
 export const SourceControlProviderInfo = Schema.Struct({
   kind: SourceControlProviderKind,

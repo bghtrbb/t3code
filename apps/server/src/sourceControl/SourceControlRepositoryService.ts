@@ -34,6 +34,9 @@ import * as SourceControlProvider from "@t3tools/source-control-core/server/Sour
 import * as SourceControlProviderRegistry from "./SourceControlProviderRegistry.ts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import { cloneUrlForProtocol, cloneUrlProtocol } from "@t3tools/shared/cloneUrl";
+import * as TovioVcsDriver from "../vcs/TovioVcsDriver.ts";
+import { isTovioCloneUrl, parseTovioCloneUrl } from "./tovioClone.ts";
+import { TOVIO_FORGE_PROVIDER_KIND } from "@t3tools/contracts";
 const isSourceControlRepositoryError = Schema.is(SourceControlRepositoryError);
 const isSourceControlProviderError = Schema.is(SourceControlProviderError);
 const isGitCommandError = Schema.is(GitCommandError);
@@ -61,6 +64,7 @@ export class SourceControlRepositoryService extends Context.Service<
 >()("t3/sourceControl/SourceControlRepositoryService") {}
 
 export interface SourceControlPreparedClone {
+  readonly tovio?: NonNullable<ReturnType<typeof parseTovioCloneUrl>>;
   readonly destinationPath: string;
   readonly remoteUrl: string;
   readonly cloneUrl: string;
@@ -201,6 +205,7 @@ export const make = Effect.gen(function* () {
   const git = yield* GitVcsDriver.GitVcsDriver;
   const path = yield* Path.Path;
   const providers = yield* SourceControlProviderRegistry.SourceControlProviderRegistry;
+  const tovio = (yield* TovioVcsDriver.enabled) ? yield* TovioVcsDriver.make : undefined;
 
   const ensureConcreteProvider = (input: {
     readonly operation: string;
@@ -253,7 +258,7 @@ export const make = Effect.gen(function* () {
   );
 
   const prepareDestination = Effect.fn("SourceControlRepositoryService.prepareDestination")(
-    function* (destinationPath: string) {
+    function* (destinationPath: string, resumeTovio: boolean) {
       const normalizedDestination = yield* normalizeDestinationPath(destinationPath);
       if (yield* fileSystem.exists(normalizedDestination)) {
         const entries = yield* fileSystem
@@ -269,7 +274,15 @@ export const make = Effect.gen(function* () {
                 }),
             ),
           );
-        if (entries.length > 0) {
+        if (
+          entries.length > 0 &&
+          !(
+            resumeTovio &&
+            (yield* fileSystem.exists(
+              path.join(normalizedDestination, ".tovio", "clone-in-progress"),
+            ))
+          )
+        ) {
           return yield* new SourceControlRepositoryError({
             operation: "cloneRepository",
             provider: SourceControlProviderKind.make("unknown"),
@@ -295,7 +308,34 @@ export const make = Effect.gen(function* () {
   const prepareClone = Effect.fn("SourceControlRepositoryService.prepareClone")(function* (
     input: SourceControlCloneRepositoryInput,
   ) {
-    const preparedDestination = yield* prepareDestination(input.destinationPath);
+    const raw = input.remoteUrl?.trim();
+    if (raw && isTovioCloneUrl(raw)) {
+      if (!tovio) {
+        return yield* new SourceControlRepositoryError({
+          operation: "cloneRepository",
+          provider: TOVIO_FORGE_PROVIDER_KIND,
+          detail: "Enable TOVIO on this T3 Code server before cloning.",
+        });
+      }
+      const target = parseTovioCloneUrl(raw);
+      if (!target) {
+        return yield* new SourceControlRepositoryError({
+          operation: "cloneRepository",
+          provider: TOVIO_FORGE_PROVIDER_KIND,
+          detail:
+            "Use tovio://host:port/repository-id or tovio+https://host/path?repo=repository-id.",
+        });
+      }
+      const destination = yield* prepareDestination(input.destinationPath, true);
+      return {
+        destinationPath: destination.destinationPath,
+        remoteUrl: raw,
+        cloneUrl: raw,
+        repository: null,
+        tovio: target,
+      };
+    }
+    const preparedDestination = yield* prepareDestination(input.destinationPath, false);
     let repository: SourceControlRepositoryInfo | null = null;
     let remoteUrl = input.remoteUrl?.trim() ?? null;
     let provider: SourceControlProviderKind =
@@ -383,6 +423,49 @@ export const make = Effect.gen(function* () {
     options?: SourceControlCloneOptions,
   ) {
     const prepared = yield* prepareClone(input);
+    if (tovio && prepared.tovio) {
+      // The URL was validated by prepareClone. A retry uses the CLI's exact-origin resume check.
+      const { native, remote, repo } = prepared.tovio;
+      const parent = path.dirname(prepared.destinationPath);
+      const cert = (yield* HostProcess.Environment).T3CODE_TOVIO_CLONE_CERT;
+      if (native && (!cert || !path.isAbsolute(cert))) {
+        return yield* new SourceControlRepositoryError({
+          operation: "cloneRepository",
+          provider: TOVIO_FORGE_PROVIDER_KIND,
+          detail:
+            "Set T3CODE_TOVIO_CLONE_CERT on the server to the remote's pinned DER certificate.",
+        });
+      }
+      yield* tovio.probe(parent).pipe(
+        Effect.andThen(
+          tovio.json(
+            "SourceControlRepositoryService.tovioClone",
+            parent,
+            [
+              "clone",
+              "--resume",
+              "--require-repository-id",
+              ...(native ? [`--cert=${cert}`] : []),
+              "--",
+              remote,
+              repo,
+              path.basename(prepared.destinationPath),
+            ],
+            Schema.Unknown,
+            options?.timeoutMs ?? 600_000,
+          ),
+        ),
+        Effect.mapError(
+          (cause) =>
+            new SourceControlRepositoryError({
+              operation: "cloneRepository",
+              provider: TOVIO_FORGE_PROVIDER_KIND,
+              detail: cause.message,
+            }),
+        ),
+      );
+      return { cwd: prepared.destinationPath, remoteUrl: prepared.remoteUrl, repository: null };
+    }
     const httpsUrl = httpsFallbackUrl(input, prepared);
     const remoteUrl = yield* runClone(
       input,

@@ -103,6 +103,7 @@ import {
   SHARED_WORKSPACE_RESTORE_MESSAGE,
 } from "./CheckpointRestoreSafety.ts";
 import { CheckpointServiceV2 } from "./CheckpointService.ts";
+import { enabled as tovioEnabled } from "../vcs/TovioVcsDriver.ts";
 import {
   CommandPolicyV2,
   goalCommandStopsActiveRun,
@@ -12324,11 +12325,16 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         });
       }
       if (command.restoreFiles !== false) {
+        const allowLocal =
+          projection.thread.worktreePath === null &&
+          (yield* tovioEnabled) &&
+          (yield* checkpointService.supportsLocalRestore(targetScope.cwd));
         const isolated = yield* isCheckpointRestoreIsolated(projection.thread, targetScope, {
           projects,
           path,
           fileSystem,
           projections: projectionStore,
+          allowLocal,
         }).pipe(
           Effect.mapError(
             (cause) =>

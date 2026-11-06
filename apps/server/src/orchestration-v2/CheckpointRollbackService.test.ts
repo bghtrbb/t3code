@@ -1,3 +1,4 @@
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it, vi } from "@effect/vitest";
 import {
@@ -53,6 +54,7 @@ const layerCheckpointRollbackService = CheckpointRollbackService.layer.pipe(
   Layer.provide(
     Layer.mergeAll(
       NodeServices.layer,
+      SqlitePersistence.layerMemory,
       Layer.mock(ServerConfig.ServerConfig)({ worktreesDir: "/synthetic-worktrees" } as never),
       ServerSettings.layerTest(),
       Layer.mock(GitWorkflow.GitWorkflowService)({}),
@@ -224,6 +226,7 @@ it.effect.each([
         Layer.mergeAll(
           ThreadCommandExecutor.layer,
           NodeServices.layer,
+          SqlitePersistence.layerMemory,
           Layer.mock(ServerConfig.ServerConfig)({ worktreesDir } as never),
           ServerSettings.layerTest(),
           Layer.mock(ProjectStore.ProjectStoreV2)({
@@ -730,4 +733,80 @@ it.layer(ProjectionStore.layer.pipe(Layer.provideMerge(SqlitePersistence.layerMe
         }),
     );
   },
+);
+
+it.effect("refuses to replay a pending native provider rollback through either rewind mode", () =>
+  Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient;
+    const threadId = ThreadId.make("native-rewind");
+    const providerThreadId = ProviderThreadId.make("native-rewind-provider");
+    const checkpointId = CheckpointId.make("native-rewind-target");
+    const scopeId = CheckpointScopeId.make("native-rewind-scope");
+    const providerInstanceId = ProviderInstanceId.make("codex");
+    const thread = {
+      id: threadId,
+      worktreePath: null,
+      activeProviderThreadId: providerThreadId,
+      modelSelection: { instanceId: providerInstanceId, model: "test" },
+    };
+    const projection = {
+      thread,
+      providerThread: {
+        id: providerThreadId,
+        providerSessionId: ProviderSessionId.make("native-rewind-session"),
+        providerInstanceId,
+      },
+      checkpoint: { id: checkpointId, scopeId, status: "ready", appRunOrdinal: null },
+      scope: { id: scopeId, cwd: process.cwd() },
+    } as unknown as ProjectionStore.ProjectionCheckpointRollbackContext;
+    yield* sql`
+      INSERT INTO native_checkpoint_rewind
+        (thread_id, target_checkpoint_id, source_checkpoint_id, provider_thread_id, phase)
+      VALUES (${threadId}, ${checkpointId}, 'latest', ${providerThreadId}, 'provider_pending')
+    `;
+    const open = vi.fn(() => Effect.die("recovery must stop before opening a provider session"));
+    const restore = vi.fn(() => Effect.die("recovery must stop before restoring files"));
+    const service = yield* CheckpointRollbackService.CheckpointRollbackServiceV2.pipe(
+      Effect.provide(
+        CheckpointRollbackService.layer.pipe(
+          Layer.provide(
+            Layer.mergeAll(
+              NodeServices.layer,
+              Layer.succeed(SqlClient.SqlClient, sql),
+              Layer.mock(ServerConfig.ServerConfig)({
+                worktreesDir: "/synthetic-worktrees",
+              } as never),
+              ServerSettings.layerTest(),
+              ThreadCommandExecutor.layer,
+              IdAllocator.layer,
+              Layer.mock(GitWorkflow.GitWorkflowService)({}),
+              Layer.mock(ProjectStore.ProjectStoreV2)({}),
+              Layer.mock(EventSink.EventSinkV2)({}),
+              Layer.mock(CheckpointService.CheckpointServiceV2)({
+                restore,
+                supportsLocalRestore: () => Effect.succeed(true),
+              }),
+              Layer.mock(ProjectionStore.ProjectionStoreV2)({
+                getThread: () => Effect.succeed(projection.thread),
+                getCheckpointRollbackContext: () => Effect.succeed(projection),
+              }),
+              Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({ open }),
+              Layer.mock(RuntimePolicy.RuntimePolicyV2)({}),
+            ),
+          ),
+        ),
+      ),
+    );
+    for (const restoreFiles of [true, false]) {
+      const error = yield* service
+        .execute({ threadId, providerThreadId, checkpointId, scopeId, restoreFiles })
+        .pipe(
+          Effect.flip,
+          Effect.provideService(HostProcess.Environment, { T3CODE_ENABLE_TOVIO: "1" }),
+        );
+      assert.equal(error.reason, "native-recovery-required");
+    }
+    assert.equal(open.mock.calls.length, 0);
+    assert.equal(restore.mock.calls.length, 0);
+  }).pipe(Effect.provide(SqlitePersistence.layerMemory)),
 );

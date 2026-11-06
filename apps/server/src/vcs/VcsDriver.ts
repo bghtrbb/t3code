@@ -7,6 +7,10 @@ import type {
   VcsListRemotesResult,
   VcsListWorkspaceFilesResult,
   VcsRepositoryIdentity,
+  TovioInspectInput,
+  TovioInspectResult,
+  TovioMutateInput,
+  TovioStatus,
 } from "@t3tools/contracts";
 import { CheckpointRef } from "@t3tools/contracts";
 import * as VcsProcess from "./VcsProcess.ts";
@@ -19,6 +23,7 @@ export interface VcsCaptureCheckpointInput {
 export interface VcsRestoreCheckpointInput {
   readonly cwd: string;
   readonly checkpointRef: CheckpointRef;
+  readonly expectedCurrentCheckpointRef?: CheckpointRef;
   readonly fallbackToHead?: boolean;
 }
 
@@ -72,6 +77,12 @@ export class VcsDriver extends Context.Service<
       input: Omit<VcsProcess.VcsProcessInput, "command">,
     ) => Effect.Effect<VcsProcess.VcsProcessOutput, VcsError>;
     readonly checkpoints: VcsCheckpointOps;
+    readonly tovio?: {
+      readonly canCheckpoint: (cwd: string) => Effect.Effect<boolean, VcsError>;
+      readonly status: (cwd: string) => Effect.Effect<TovioStatus, VcsError>;
+      readonly inspect: (input: TovioInspectInput) => Effect.Effect<TovioInspectResult, VcsError>;
+      readonly mutate: (input: TovioMutateInput) => Effect.Effect<void, VcsError>;
+    };
     readonly detectRepository: (
       cwd: string,
     ) => Effect.Effect<VcsRepositoryIdentity | null, VcsError>;
