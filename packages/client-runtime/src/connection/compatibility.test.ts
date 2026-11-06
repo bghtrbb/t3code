@@ -31,7 +31,10 @@ describe("orchestration protocol compatibility", () => {
     expect(socketUrl.searchParams.get("orchestrationProtocol")).toBe(
       String(ORCHESTRATION_PROTOCOL_VERSION),
     );
-    expect(socketUrl.searchParams.get("clientCapabilities")).toBe("settingsSecretReferences");
+    expect(socketUrl.searchParams.get("clientCapabilities")?.split(",")).toEqual([
+      "settingsSecretReferences",
+      "tovioSourceControlV1",
+    ]);
     expect(socketUrl.searchParams.get("wsTicket")).toBe("secret");
     expect(socketUrl.searchParams.get("connectionMethod")).toBe("relay");
   });
