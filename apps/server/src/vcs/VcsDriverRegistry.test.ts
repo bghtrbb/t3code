@@ -28,7 +28,12 @@ const nativeCliDir = process.env.TOVIO_TEST_CLI_DIR;
 const DETECT_COMMAND = "rev-parse --is-inside-work-tree --show-toplevel --git-common-dir";
 
 describe("VcsDriverRegistry", () => {
-  const makeDiskBackedLayer = (rootDir: string, calls: string[], contractVersion = 1) =>
+  const makeDiskBackedLayer = (
+    rootDir: string,
+    calls: string[],
+    contractVersion = 1,
+    forgeReview = true,
+  ) =>
     Layer.effect(VcsDriverRegistry.VcsDriverRegistry, VcsDriverRegistry.make).pipe(
       Layer.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)),
       Layer.provide(
@@ -70,7 +75,7 @@ describe("VcsDriverRegistry", () => {
                 return processOutput(
                   JSON.stringify({
                     result: input.args.includes("capabilities")
-                      ? { version: contractVersion, vcs: true, forge_review: true }
+                      ? { version: contractVersion, vcs: true, forge_review: forgeReview }
                       : { root: input.cwd },
                   }),
                 );
@@ -185,6 +190,45 @@ describe("VcsDriverRegistry", () => {
       }).pipe(
         Effect.provide(makeDiskBackedLayer(root, [])),
         Effect.provideService(HostProcess.Environment, { PATH: bin, T3CODE_ENABLE_TOVIO: "1" }),
+      );
+    }).pipe(Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))),
+  );
+
+  it.effect("refuses proposal operations when the CLI does not advertise review", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const platform = yield* HostProcess.Platform;
+      const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-tovio-review-capability-" });
+      const executable = path.join(root, platform === "win32" ? "tovio.exe" : "tovio");
+      yield* fs.writeFileString(executable, "", { mode: 0o755 });
+      const calls: string[] = [];
+      yield* Effect.gen(function* () {
+        const registry = yield* VcsDriverRegistry.VcsDriverRegistry;
+        const { tovio } = yield* registry.get("tovio");
+        const error = yield* tovio!
+          .inspect({ cwd: root, operation: "review", proposal: "prop:fixture" })
+          .pipe(Effect.flip);
+        assert.equal(error._tag, "VcsUnsupportedOperationError");
+        const mutationError = yield* tovio!
+          .mutate({
+            cwd: root,
+            action: {
+              kind: "propose",
+              change: "chg:fixture",
+              target: "main",
+              requestId: "prop:0123456789abcdef0123456789abcdef",
+            },
+          })
+          .pipe(Effect.flip);
+        assert.equal(mutationError._tag, "VcsUnsupportedOperationError");
+        assert.deepEqual(calls, [
+          "--json --no-sync integration capabilities",
+          "--json --no-sync integration capabilities",
+        ]);
+      }).pipe(
+        Effect.provide(makeDiskBackedLayer(root, calls, 1, false)),
+        Effect.provideService(HostProcess.Environment, { PATH: root, T3CODE_ENABLE_TOVIO: "1" }),
       );
     }).pipe(Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))),
   );

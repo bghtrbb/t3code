@@ -176,6 +176,18 @@ export const make = Effect.gen(function* () {
       ),
     );
 
+  const requireReview = (cwd: string) =>
+    probe(cwd).pipe(
+      Effect.filterOrFail(
+        ({ forge_review }) => forge_review === true,
+        () =>
+          unavailable(
+            "TovioVcsDriver.requireReview",
+            "Install a TOVIO CLI with Tovio Cloud review support on the server.",
+          ),
+      ),
+    );
+
   const findRoot = Effect.fn("TovioVcsDriver.findRoot")(function* (cwd: string) {
     let folder = path.resolve(cwd);
     for (;;) {
@@ -316,6 +328,9 @@ export const make = Effect.gen(function* () {
   );
 
   const inspect = Effect.fn("TovioVcsDriver.inspect")(function* (input: TovioInspectInput) {
+    if (input.operation === "proposals" || input.operation === "review") {
+      yield* requireReview(input.cwd);
+    }
     if (input.operation === "lanes") {
       const { lanes } = yield* json(
         "TovioVcsDriver.lanes",
@@ -368,15 +383,18 @@ export const make = Effect.gen(function* () {
         json("TovioVcsDriver.status", cwd, ["integration", "status"], TovioStatus),
       ),
       inspect,
-      mutate: Effect.fn("TovioVcsDriver.mutate")((input) =>
-        json(
+      mutate: Effect.fn("TovioVcsDriver.mutate")(function* (input) {
+        if (input.action.kind === "propose" || input.action.kind === "decide") {
+          yield* requireReview(input.cwd);
+        }
+        yield* json(
           "TovioVcsDriver.mutate",
           input.cwd,
           mutationArgs(input.action),
           Schema.Unknown,
           120_000,
-        ).pipe(Effect.asVoid),
-      ),
+        );
+      }),
     },
     detectRepository,
     isInsideWorkTree: Effect.fn("TovioVcsDriver.isInsideWorkTree")((cwd) =>

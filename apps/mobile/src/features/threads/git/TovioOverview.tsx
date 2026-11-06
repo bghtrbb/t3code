@@ -19,11 +19,13 @@ export function TovioOverview({
   environmentId,
   status,
   canWrite,
+  canReview,
 }: {
   cwd: string;
   environmentId: EnvironmentId;
   status: TovioStatus;
   canWrite: boolean;
+  canReview: boolean;
 }) {
   const [pending, startTransition] = useTransition();
   const [result, setResult] = useState<TovioInspectResult | null>(null);
@@ -116,85 +118,91 @@ export function TovioOverview({
       />
       <ListRow label="Pull" disabled={writeDisabled} onPress={() => run({ kind: "pull" })} />
       <ListRow label="Push" disabled={writeDisabled} onPress={() => run({ kind: "push" })} />
-      <TextInput
-        accessibilityLabel="Proposal target lane"
-        value={target}
-        editable={requestId === null}
-        onChangeText={setTarget}
-        className="px-3 py-2 text-foreground"
-      />
-      <ListRow
-        label="List Tovio Cloud proposals"
-        disabled={pending || !target.trim()}
-        onPress={() => load({ cwd, operation: "proposals", target: target.trim() })}
-      />
-      <TextInput
-        accessibilityLabel="Committed change ID"
-        placeholder="Committed change ID"
-        value={change}
-        editable={requestId === null}
-        onChangeText={setChange}
-        className="px-3 py-2 text-foreground"
-      />
-      <ListRow
-        label={requestId ? "Retry proposal" : "Create proposal"}
-        disabled={writeDisabled || !target.trim() || !change.trim()}
-        onPress={() => {
-          const id = requestId ?? `prop:${uuidv4().replaceAll("-", "")}`;
-          setRequestId(id);
-          run({ kind: "propose", change: change.trim(), target: target.trim(), requestId: id });
-        }}
-      />
-      {requestId && <Text selectable>{requestId}</Text>}
-      {result?.operation === "proposals" &&
-        result.proposals.map((proposal) => (
-          <ListRow
-            key={proposal.id}
-            label={proposal.id}
-            description={proposal.state}
-            disabled={pending}
-            onPress={() => load({ cwd, operation: "review", proposal: proposal.id })}
+      {canReview && (
+        <>
+          <TextInput
+            accessibilityLabel="Proposal target lane"
+            value={target}
+            editable={requestId === null}
+            onChangeText={setTarget}
+            className="px-3 py-2 text-foreground"
           />
-        ))}
-      {result?.operation === "review" && (
-        <View className="gap-2 px-3 py-2">
-          <Text>
-            {result.proposal.id} · Revision {result.proposal.revision}
-          </Text>
-          <Text>Commit {result.proposal.commit}</Text>
-          {result.webUrl && (
-            <ListRow
-              label="Open in Tovio Cloud"
-              onPress={() => {
-                const url = result.webUrl;
-                if (url?.startsWith("https://")) void Linking.openURL(url);
-              }}
-            />
-          )}
-          {result.review.files.map((file) => (
-            <View key={file.path}>
+          <ListRow
+            label="List Tovio Cloud proposals"
+            disabled={pending || !target.trim()}
+            onPress={() => load({ cwd, operation: "proposals", target: target.trim() })}
+          />
+          <TextInput
+            accessibilityLabel="Committed change ID"
+            placeholder="Committed change ID"
+            value={change}
+            editable={requestId === null}
+            onChangeText={setChange}
+            className="px-3 py-2 text-foreground"
+          />
+          <ListRow
+            label={requestId ? "Retry proposal" : "Create proposal"}
+            disabled={writeDisabled || !target.trim() || !change.trim()}
+            onPress={() => {
+              const id = requestId ?? `prop:${uuidv4().replaceAll("-", "")}`;
+              setRequestId(id);
+              run({ kind: "propose", change: change.trim(), target: target.trim(), requestId: id });
+            }}
+          />
+          {requestId && <Text selectable>{requestId}</Text>}
+          {result?.operation === "proposals" &&
+            result.proposals.map((proposal) => (
+              <ListRow
+                key={proposal.id}
+                label={proposal.id}
+                description={proposal.state}
+                disabled={pending}
+                onPress={() => load({ cwd, operation: "review", proposal: proposal.id })}
+              />
+            ))}
+          {result?.operation === "review" && (
+            <View className="gap-2 px-3 py-2">
               <Text>
-                {file.path} · {file.marker}
+                {result.proposal.id} · Revision {result.proposal.revision}
               </Text>
-              <Text selectable>
-                {file.hunks?.map((line) => `${line.sign}${line.text}`).join("\n") ??
-                  "Content is unavailable to this identity."}
-              </Text>
+              <Text>Commit {result.proposal.commit}</Text>
+              {result.webUrl && (
+                <ListRow
+                  label="Open in Tovio Cloud"
+                  onPress={() => {
+                    const url = result.webUrl;
+                    if (url?.startsWith("https://")) void Linking.openURL(url);
+                  }}
+                />
+              )}
+              {result.review.files.map((file) => (
+                <View key={file.path}>
+                  <Text>
+                    {file.path} · {file.marker}
+                  </Text>
+                  <Text selectable>
+                    {file.hunks?.map((line) => `${line.sign}${line.text}`).join("\n") ??
+                      "Content is unavailable to this identity."}
+                  </Text>
+                </View>
+              ))}
+              <ListRow
+                label="Approve"
+                disabled={writeDisabled}
+                onPress={() =>
+                  run({ kind: "decide", proposal: result.proposal, decision: "approve" })
+                }
+              />
+              <ListRow
+                label="Request changes"
+                disabled={writeDisabled}
+                onPress={() =>
+                  run({ kind: "decide", proposal: result.proposal, decision: "request-changes" })
+                }
+              />
             </View>
-          ))}
-          <ListRow
-            label="Approve"
-            disabled={writeDisabled}
-            onPress={() => run({ kind: "decide", proposal: result.proposal, decision: "approve" })}
-          />
-          <ListRow
-            label="Request changes"
-            disabled={writeDisabled}
-            onPress={() =>
-              run({ kind: "decide", proposal: result.proposal, decision: "request-changes" })
-            }
-          />
-        </View>
+          )}
+        </>
       )}
     </ListSection>
   );

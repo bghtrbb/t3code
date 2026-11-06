@@ -1,10 +1,13 @@
-import type {
-  EnvironmentId,
-  TovioInspectResult,
-  TovioMutateInput,
-  TovioStatus,
+import {
+  TOVIO_FORGE_PROVIDER_KIND,
+  type EnvironmentId,
+  type TovioInspectResult,
+  type TovioMutateInput,
+  type TovioStatus,
 } from "@t3tools/contracts";
 import { useState, useTransition } from "react";
+import { useEnvironmentQuery } from "../state/query";
+import { sourceControlEnvironment } from "../state/sourceControl";
 import { useAtomCommand } from "../state/use-atom-command";
 import { vcsEnvironment } from "../state/vcs";
 import { Button } from "./ui/button";
@@ -33,6 +36,12 @@ export function TovioActionsControl({
   const inspect = useAtomCommand(vcsEnvironment.inspectTovio);
   const mutate = useAtomCommand(vcsEnvironment.mutateTovio);
   const disabled = !canWrite || pending;
+  const discovery = useEnvironmentQuery(
+    showActions ? sourceControlEnvironment.discovery({ environmentId, input: {} }) : null,
+  );
+  const canReview = discovery.data?.sourceControlProviders.some(
+    ({ kind, status }) => kind === TOVIO_FORGE_PROVIDER_KIND && status === "available",
+  );
 
   const load = (operation: "lanes" | "diff") =>
     startTransition(async () => {
@@ -156,7 +165,13 @@ export function TovioActionsControl({
               Commit change
             </Button>
           </form>
-          <TovioProposals cwd={cwd} environmentId={environmentId} canWrite={canWrite && !pending} />
+          {canReview && (
+            <TovioProposals
+              cwd={cwd}
+              environmentId={environmentId}
+              canWrite={canWrite && !pending}
+            />
+          )}
         </>
       )}
     </section>

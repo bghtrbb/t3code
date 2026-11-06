@@ -7,7 +7,7 @@ import {
   getGitActionDisabledReason,
   requiresDefaultBranchConfirmation,
 } from "@t3tools/client-runtime/state/vcs";
-import { EnvironmentId, ThreadId } from "@t3tools/contracts";
+import { EnvironmentId, ThreadId, TOVIO_FORGE_PROVIDER_KIND } from "@t3tools/contracts";
 import { sourceControlClients } from "@t3tools/client-runtime/source-control-clients";
 import {
   CommonActions,
@@ -256,6 +256,11 @@ function GitOverviewSheetContent(props: GitOverviewSheetProps) {
           environmentId={selectedThread.environmentId}
           status={gitStatus.data.tovio}
           canWrite={canWriteSourceControl}
+          canReview={
+            gitState.sourceControlDiscovery.data?.sourceControlProviders.some(
+              ({ kind, status }) => kind === TOVIO_FORGE_PROVIDER_KIND && status === "available",
+            ) ?? false
+          }
         />
       ) : (
         <ListSection>
